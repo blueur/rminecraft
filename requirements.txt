@@ -1,0 +1,2 @@
+mcrcon~=0.6.0
+python-telegram-bot~=12.5.1
