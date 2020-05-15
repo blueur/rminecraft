@@ -1,71 +1,104 @@
 import logging
 import os
 
-from telegram.ext import Updater, CommandHandler
 from mcrcon import MCRcon
+from telegram import Update
+from telegram.ext import CallbackContext, CommandHandler, Updater
 
-TG_BOT_TOKEN = os.environ["TG_BOT_TOKEN"]
-MCRCON_HOST = os.environ["MCRCON_HOST"]
-MCRCON_PASS = os.environ["MCRCON_PASS"]
+TG_BOT_TOKEN = os.getenv('TG_BOT_TOKEN')
+MCRCON_HOST = os.getenv('MCRCON_HOST')
+MCRCON_PASS = os.getenv('MCRCON_PASS')
+UPDATE_INTERVAL = int(os.getenv('UPDATE_INTERVAL', '8'))
+
+JOB_KEY = 'notification'
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-def start(update, context):
+class ContextData:
+    def __init__(self, chat_id: int, last_list: str):
+        self.chat_id = chat_id
+        self.last_list = last_list
+
+
+def help(update: Update, context: CallbackContext):
     update.message.reply_text('Available commands: \n'
-                              '/list : Lists all currently connected players. \n'
-                              '/say <message> : Broadcasts a message to all players as the server. \n'
-                              '/give <player> <name> : Gives player blocks/items with the item name name. ')
+                              '/give <target> <item> [<count>] : Gives an item to a player. \n'
+                              '/list : Lists players on the server. \n'
+                              '/say <message> : Displays a message to multiple players. \n'
+                              '/tell <targets> <message> : Displays a private message to other players. \n'
+                              '/subscribe : Subscribe to notifications. \n'
+                              '/unsubscribe : Unsubscribe to notifications. \n'
+                              )
 
 
-def execute(command):
-    logger.info(command)
+def execute(command: str):
+    logger.debug(command)
     with MCRcon(MCRCON_HOST, MCRCON_PASS) as mcr:
         response = mcr.command(command)
-        logger.info(response)
+        logger.debug(response)
         return response
 
 
-def list(update, context):
-    update.message.reply_text(execute("/list"))
+def execute_and_reply(update: Update, context: CallbackContext):
+    update.message.reply_text(execute(update.message.text))
 
 
-def say(update, context):
-    split = update.message.text.split(" ", 1)
-    if len(split) == 2:
-        message = split[1]
-        execute("/say " + message)
-        update.message.reply_text(message)
+def execute_silent(update: Update, context: CallbackContext):
+    execute(update.message.text)
 
 
-def give(update, context):
-    argument = " ".join(update.message.text.split(" ", 2)[1:])
-    update.message.reply_text(execute("/give " + argument))
+def list():
+    return execute('/list')
 
 
-def error(update, context):
+def check_notification(context: CallbackContext):
+    new_list = list()
+    context_data: ContextData = context.job.context
+    if new_list != context_data.last_list:
+        context.bot.send_message(chat_id=context_data.chat_id, text=new_list)
+        context.job.context = ContextData(context_data.chat_id, new_list)
+
+
+def subscribe(update: Update, context: CallbackContext):
+    unsubscribe(update, context)
+    context_data = ContextData(update.message.chat_id, list())
+    context.chat_data[JOB_KEY] = context.job_queue.run_repeating(check_notification, UPDATE_INTERVAL,
+                                                                 context=context_data)
+
+
+def unsubscribe(update: Update, context: CallbackContext):
+    if JOB_KEY in context.chat_data:
+        context.chat_data[JOB_KEY].schedule_removal()
+        del context.chat_data[JOB_KEY]
+
+
+def error(update: Update, context: CallbackContext):
     logger.warning('Update "%s" caused error "%s"', update, context.error)
 
 
 def main():
-    logger.info("TG_BOT_TOKEN=%s", TG_BOT_TOKEN)
-    logger.info("MCRCON_HOST=%s", MCRCON_HOST)
-    logger.info("MCRCON_PASS=%s", MCRCON_PASS)
+    logger.info('TG_BOT_TOKEN=%s', TG_BOT_TOKEN)
+    logger.info('MCRCON_HOST=%s', MCRCON_HOST)
+    logger.info('MCRCON_PASS=%s', MCRCON_PASS)
 
     updater = Updater(TG_BOT_TOKEN, use_context=True)
 
     dp = updater.dispatcher
 
-    dp.add_handler(CommandHandler("start", start))
-    dp.add_handler(CommandHandler("help", start))
-    dp.add_handler(CommandHandler("list", list))
-    dp.add_handler(CommandHandler("say", say))
-    dp.add_handler(CommandHandler("give", give))
+    dp.add_handler(CommandHandler('start', help))
+    dp.add_handler(CommandHandler('help', help))
+    dp.add_handler(CommandHandler('give', execute_and_reply))
+    dp.add_handler(CommandHandler('list', execute_and_reply))
+    dp.add_handler(CommandHandler('say', execute_silent))
+    dp.add_handler(CommandHandler('tell', execute_and_reply))
+    dp.add_handler(CommandHandler('subscribe', subscribe))
+    dp.add_handler(CommandHandler('unsubscribe', unsubscribe))
 
     dp.add_error_handler(error)
 
-    updater.start_polling()
+    updater.start_polling(poll_interval=UPDATE_INTERVAL)
 
     updater.idle()
 
